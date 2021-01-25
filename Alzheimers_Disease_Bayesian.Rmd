@@ -1,0 +1,226 @@
+---
+title: "Bayesian Analysis of Alzheimer's Disease Cross-sectional Data"
+author: "Eddie Grinman"
+date: "1/5/2021"
+output: html_document
+# https://www.kaggle.com/jboysen/mri-and-alzheimers?select=oasis_cross-sectional.csv
+# https://www.oasis-brains.org/
+
+What do variables stand for
+Subject.ID
+MRI.ID
+Group (Converted / Demented / Nondemented)
+Visit - Number of visit
+MR.Delay
+Demographics Info
+M.F - Gender
+Hand - Handedness (actually all subjects were right-handed so I will drop this column)
+Age
+EDUC - Years of education
+SES - Socioeconomic status as assessed by the Hollingshead Index of Social Position and classified into categories from 1 (highest status) to 5 (lowest status)
+Clinical Info
+MMSE - Mini-Mental State Examination score (range is from 0 = worst to 30 = best)
+CDR - Clinical Dementia Rating (0 = no dementia, 0.5 = very mild AD, 1 = mild AD, 2 = moderate AD)
+Derived anatomic volumes
+eTIV - Estimated total intracranial volume, mm3
+nWBV - Normalized whole-brain volume, expressed as a percent of all voxels in the atlas-masked image that are labeled as gray or white matter by the automated tissue segmentation process
+ASF - Atlas scaling factor (unitless). Computed scaling factor that transforms native-space brain and skull to the atlas target (i.e., the determinant of the transform matrix)
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import packages and load in data
+
+```{r, warning=FALSE}
+library(rjags)
+library(ggplot2)
+library(dplyr)
+setwd('/Users/eddiegrinman/Desktop/Machine Learning/Bayesian_stats 2_techniques_models')
+alz = read.csv('oasis_cross-sectional.csv')
+```
+
+## Preprocess the data
+
+```{r}
+alz$M.Fnum = ifelse(alz$M.F == 'M', 0, 1) # Make Male and Female into 0 and 1
+alz = na.omit(alz) # remove NAs
+alz_subset = alz[,c(4,6,7,9,10,13)] # These are the variables I want to test from the larger dataset
+```
+
+## View the data
+
+```{r}
+str(alz_subset)
+pairs(alz_subset)
+lm_alz = lm(MMSE~Age+SES+eTIV+nWBV+M.Fnum,data=alz_subset) # run a standard linear model to compare later with the bayesian
+summary(lm_alz)
+```
+
+## Bayesian linear model using Monte Carlo simulations
+
+```{r}
+mod_string = " model {
+    for (i in 1:216) {
+        MMSE[i] ~ dnorm(mu[i], prec)
+        mu[i] = b[1] + b[2]*Age[i] + b[3]*SES[i] + b[4]*eTIV[i] + b[5]*nWBV[i] +
+        b[6]*M.Fnum[i]
+    }
+    
+    for (i in 1:6) {
+        b[i] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    
+    prec ~ dgamma(5/2.0, 5*10.0/2.0)
+    sig2 = 1.0 / prec
+    sig = sqrt(sig2)
+} "
+
+set.seed(72)
+data1_jags = list(MMSE=alz_subset$MMSE, Age = alz_subset$Age, 
+                  SES = alz_subset$SES, eTIV = alz_subset$eTIV, 
+                  nWBV = alz_subset$nWBV, M.Fnum = alz_subset$M.Fnum)
+
+params1 = c("b", "sig") # parameters to monitor
+
+inits1 = function() { 
+  inits = list("b"=rnorm(6, 0, 10), "prec"=rgamma(1,1,1)) # give initial values for the parameters
+}
+```
+
+## Run the model
+
+```{r}
+mod = jags.model(textConnection(mod_string), data=data1_jags, inits=inits1, n.chains=6)
+
+update(mod,2000)
+
+mod_sim = coda.samples(model = mod, variable.names = params1, n.iter = 10000)
+```
+
+## Convergence Diagnostics
+
+```{r}
+gelman.diag(mod_sim)  # Indicates convergence
+autocorr.diag(mod_sim) # print out autocorrelation
+coda::autocorr.plot(mod_sim) # plot the autocorrelation
+summary(mod_sim) # Summary of the model
+effectiveSize(mod_sim)
+```
+
+## Find posterior means and make predictions
+
+```{r}
+mod_csim = as.mcmc(do.call(rbind, mod_sim)) # combine multiple chains
+
+
+pm_params = colMeans(mod_csim) # posterior mean
+X = cbind(rep(1,216),data1_jags$Age,data1_jags$SES,data1_jags$eTIV,data1_jags$nWBV) # Create a prediction matrix using each coefficient
+
+yhat = drop(X %*% pm_params[1:5]) # use the prediction matrix to make a predicted MMSE score
+resid = data1_jags$MMSE - yhat # difference between value and prediction
+```
+
+## Plot the results and compare with standard model
+
+```{r}
+plot(yhat, resid, main = 'Bayesian Model Residuals vs Predicted', abline(a=0, b=0)) # against data index
+plot(predict(lm_alz), resid(lm_alz), main = 'Standard Model Residuals vs Predicted', abline(a=0, b=0)) 
+# Compare with the standard model
+qqnorm(resid, main = 'Bayesian Model QQ plot')
+qqline(resid)
+qqnorm(lm_alz$residuals, main = 'Standard Model QQ plot')
+qqline(lm_alz$residuals)
+```
+
+## Build Hierarchical Model based on socioeconomic status
+
+```{r}
+mod_string = " model {
+  for (i in 1:216) {
+    MMSE[i] ~ dnorm(mu[i], prec)
+    mu[i] = a[SES[i]] + b[1]*Age[i] + b[2]*eTIV[i] + b[3]*nWBV[i] + b[4]*M.Fnum[i]
+    }
+    
+  for (j in 1:5) { # Grouping by SES (1-5)
+    a[j] ~ dnorm(a0, prec_a)
+  }
+  
+  a0 ~ dnorm(0.0, 1.0/1.0e6)
+  prec_a ~ dgamma(1/2.0, 1*10.0/2.0)
+  tau = sqrt( 1.0 / prec_a ) # standard deviation of the normal distribution
+  
+  for (j in 1:4) {
+    b[j] ~ dnorm(0.0, 1.0/1.0e6)
+  }
+  
+  prec ~ dgamma(5/2.0, 5*10.0/2.0) # prior for precision
+  sig = sqrt( 1.0 / prec ) # prior for likelihood
+} "
+```
+
+## Run the hierarchical model
+
+```{r}
+set.seed(116)
+data_jags = list(MMSE=alz_subset$MMSE, Age = alz_subset$Age, 
+                  SES = alz_subset$SES, eTIV = alz_subset$eTIV, 
+                  nWBV = alz_subset$nWBV, M.Fnum = alz_subset$M.Fnum)
+
+params = c("a0", "a", "b", "sig", "tau")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=5)
+update(mod, 1e3) # burn-in
+
+mod_sim = coda.samples(model=mod,
+                       variable.names=params,
+                       n.iter=5e3) # posterior samples
+
+mod_csim = as.mcmc(do.call(rbind, mod_sim)) # combine multiple chains
+
+```
+
+
+## Convergence
+
+```{r}
+plot(mod_sim)
+gelman.diag(mod_sim)  # Indicates convergence
+autocorr.diag(mod_sim)
+effectiveSize(mod_sim) # Sigma parameter mixed well
+summary(mod_sim)
+
+# summary(lmod) # Compare the linear model with the model we made
+
+```
+
+
+## Test predictions for the hierarchical model based on SES
+```{r}
+(pm_params1 = colMeans(mod_csim)) # posterior mean estimates for the parameters
+
+alz_subset = alz_subset[order(alz_subset$SES),]
+summary(as.factor(alz_subset$SES))
+yhat = c(rep(pm_params[1],50),rep(pm_params[2],65),rep(pm_params[3],49),
+         rep(pm_params[4],49),rep(pm_params[5],3)) # generate predicted values!
+resid = alz_subset$MMSE - yhat
+plot(resid)
+
+plot(jitter(yhat), resid) # residuals for each group
+
+
+X = cbind(rep(1, data1_jags$n), data1_jags$log_income)
+yhat1 = drop( X %*% pm_params1[1:2] )
+resid1 = data1_jags$y - yhat1
+plot(resid1)
+plot(yhat1, resid1) # the equivalent of prediction. The bayesian works better than non bayesian
+qqnorm(resid1)
+qqline(resid1) # The bayesian is more normally distributed than the non bayesian linear model
+
+
+
+```
+
+
+
