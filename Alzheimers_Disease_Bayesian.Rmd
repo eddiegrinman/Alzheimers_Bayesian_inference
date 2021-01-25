@@ -3,7 +3,6 @@ title: "Bayesian Analysis of Alzheimer's Disease Cross-sectional Data"
 author: "Eddie Grinman"
 date: "1/5/2021"
 output: html_document
-# https://www.kaggle.com/jboysen/mri-and-alzheimers?select=oasis_cross-sectional.csv
 # https://www.oasis-brains.org/
 
 What do variables stand for
